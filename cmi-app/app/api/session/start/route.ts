@@ -1,10 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { SUPPORTED_LANGUAGES } from '@/lib/utils'
 
 export async function POST(request: NextRequest) {
+  console.log('Session start API called')
+  
+  // Check if we should run in demo mode first
+  const isDemoMode = !process.env.FIREBASE_SERVICE_ACCOUNT_KEY || 
+                     !process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 
+                     process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID === 'your_firebase_project_id'
+  
+  console.log('Demo mode:', isDemoMode)
+  console.log('FIREBASE_SERVICE_ACCOUNT_KEY exists:', !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
+  
   try {
     const { student_id, target_language, rubric_id, first_name } = await request.json()
+    console.log('Request data:', { student_id, target_language, rubric_id, first_name })
 
     // Validate input
     if (!target_language || !SUPPORTED_LANGUAGES.some(lang => lang.code === target_language)) {
@@ -14,9 +24,9 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Demo mode - return mock data if no Supabase URL is configured
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'https://your-project.supabase.co') {
-      console.log('Running in demo mode - no Supabase configured')
+    // Demo mode - return mock data if Firebase is not configured
+    if (isDemoMode) {
+      console.log('Running in demo mode - Firebase not fully configured')
       
       const mockSession = {
         session_id: 'demo-session-' + Date.now(),
@@ -34,7 +44,7 @@ export async function POST(request: NextRequest) {
         initial_question: getInitialQuestion(target_language),
         session_data: {
           id: 'demo-session-' + Date.now(),
-          student_name: first_name,
+          student_name: first_name || 'Demo User',
           started_at: new Date().toISOString()
         }
       }
@@ -42,108 +52,96 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(mockSession)
     }
 
-    // Real Supabase implementation
-    const supabase = await createServerSupabaseClient()
+    // Real Firebase implementation - only import if not in demo mode
+    const { createStudentServer, getDefaultRubric } = await import('@/lib/firebase/database')
+    const { adminDb } = await import('@/lib/firebase/admin')
+
+    let actualStudentId = student_id
 
     // If no student_id provided, create a new student
-    let actualStudentId = student_id
     if (!actualStudentId && first_name) {
-      const { data: newStudent, error: studentError } = await supabase
-        .from('students')
-        .insert({
-          first_name,
-          target_language
+      try {
+        actualStudentId = await createStudentServer({
+          firstName: first_name,
+          targetLanguage: target_language
         })
-        .select()
-        .single()
-
-      if (studentError) {
-        console.error('Error creating student:', studentError)
+      } catch (error) {
+        console.error('Error creating student:', error)
         return NextResponse.json(
           { error: 'Failed to create student' },
           { status: 500 }
         )
       }
-
-      actualStudentId = newStudent.id
     }
 
     // Get default rubric if not provided
     let actualRubricId = rubric_id
     if (!actualRubricId) {
-      const { data: defaultRubric, error: rubricError } = await supabase
-        .from('rubrics')
-        .select('id')
-        .eq('language', target_language)
-        .limit(1)
-        .single()
-
-      if (rubricError || !defaultRubric) {
-        console.error('Error fetching rubric:', rubricError)
+      try {
+        const defaultRubric = await getDefaultRubric(target_language)
+        if (!defaultRubric) {
+          return NextResponse.json(
+            { error: 'No rubric available for this language' },
+            { status: 404 }
+          )
+        }
+        actualRubricId = defaultRubric.id
+      } catch (error) {
+        console.error('Error fetching rubric:', error)
         return NextResponse.json(
-          { error: 'No rubric available for this language' },
-          { status: 404 }
+          { error: 'Failed to fetch rubric' },
+          { status: 500 }
         )
       }
-
-      actualRubricId = defaultRubric.id
     }
 
     // Create new session
-    const { data: session, error: sessionError } = await supabase
-      .from('oral_sessions')
-      .insert({
-        student_id: actualStudentId,
-        rubric_id: actualRubricId
-      })
-      .select(`
-        *,
-        students (
-          first_name,
-          target_language
-        ),
-        rubrics (
-          name,
-          language,
-          criteria
-        )
-      `)
-      .single()
-
-    if (sessionError) {
-      console.error('Error creating session:', sessionError)
+    let sessionId: string
+    try {
+      sessionId = await adminDb.collection('sessions').add({
+        studentId: actualStudentId,
+        rubricId: actualRubricId,
+        startedAt: new Date()
+      }).then((doc: any) => doc.id)
+    } catch (error) {
+      console.error('Error creating session:', error)
       return NextResponse.json(
         { error: 'Failed to create session' },
         { status: 500 }
       )
     }
 
-    // Get initial question
-    const { data: questions, error: questionsError } = await supabase
-      .from('questions')
-      .select('*')
-      .eq('language', target_language)
-      .eq('difficulty', 'beginner')
-      .limit(5)
+    // Get session details
+    const [sessionDoc, studentDoc, rubricDoc] = await Promise.all([
+      adminDb.collection('sessions').doc(sessionId).get(),
+      adminDb.collection('students').doc(actualStudentId).get(),
+      adminDb.collection('rubrics').doc(actualRubricId).get()
+    ])
 
-    if (questionsError || !questions || questions.length === 0) {
-      console.error('Error fetching questions:', questionsError)
+    if (!sessionDoc.exists || !studentDoc.exists || !rubricDoc.exists) {
       return NextResponse.json(
-        { error: 'No questions available for this language' },
-        { status: 404 }
+        { error: 'Failed to retrieve session details' },
+        { status: 500 }
       )
     }
 
-    // Select a random question
-    const initialQuestion = questions[Math.floor(Math.random() * questions.length)]
+    const session = { id: sessionDoc.id, ...sessionDoc.data() }
+    const student = { id: studentDoc.id, ...studentDoc.data() } as any
+    const rubric = { id: rubricDoc.id, ...rubricDoc.data() }
+
+    // Get initial question
+    const initialQuestion = getInitialQuestionFromRubric(target_language)
 
     return NextResponse.json({
-      session_id: session.id,
+      session_id: sessionId,
       student_id: actualStudentId,
       language: target_language,
-      rubric: session.rubrics,
-      initial_question: initialQuestion.question_text,
-      session_data: session
+      rubric: rubric,
+      initial_question: initialQuestion,
+      session_data: {
+        ...session,
+        student_name: student.firstName
+      }
     })
   } catch (error) {
     console.error('Error in session start:', error)
@@ -164,4 +162,9 @@ function getInitialQuestion(language: string): string {
   }
   
   return questions[language as keyof typeof questions] || questions['en']
+}
+
+function getInitialQuestionFromRubric(language: string): string {
+  // This could be enhanced to select questions based on rubric criteria
+  return getInitialQuestion(language)
 } 

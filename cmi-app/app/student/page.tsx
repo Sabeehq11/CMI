@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft, Mic, Sparkles, User, Globe, HeadphonesIcon } from 'lucide-react'
 import Link from 'next/link'
@@ -13,15 +13,55 @@ export default function StudentPortal() {
   const [targetLanguage, setTargetLanguage] = useState('en')
   const [isStarting, setIsStarting] = useState(false)
 
+  const checkWebSocketConnection = async (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      try {
+        const ws = new WebSocket('ws://localhost:3001/websocket')
+        
+        const timeout = setTimeout(() => {
+          ws.close()
+          resolve(false)
+        }, 1000) // Reduced to 1 second timeout
+        
+        ws.onopen = () => {
+          clearTimeout(timeout)
+          ws.close()
+          resolve(true)
+        }
+        
+        ws.onerror = (error) => {
+          clearTimeout(timeout)
+          resolve(false)
+        }
+        
+        ws.onclose = (event) => {
+          console.log('WebSocket closed:', event.code, event.reason)
+        }
+      } catch (error) {
+        resolve(false)
+      }
+    })
+  }
+
   const handleStartInterview = async () => {
     if (!firstName.trim()) {
-      toast.error('Please enter your first name')
+      alert('Please enter your first name')
       return
     }
 
     setIsStarting(true)
     
     try {
+      // Check WebSocket connection first
+      const wsConnected = await checkWebSocketConnection()
+      
+      if (!wsConnected) {
+        alert('Interview server is not running. Please contact your administrator.')
+        console.error('WebSocket server not available at ws://localhost:3001/websocket')
+        setIsStarting(false)
+        return
+      }
+      
       // In a real implementation, this would create a student record and session
       // For now, we'll simulate it
       const sessionData = {
@@ -36,7 +76,7 @@ export default function StudentPortal() {
       router.push('/student/interview')
     } catch (error) {
       console.error('Error starting interview:', error)
-      toast.error('Failed to start interview. Please try again.')
+      alert('Failed to start interview. Please try again.')
       setIsStarting(false)
     }
   }
@@ -177,6 +217,7 @@ export default function StudentPortal() {
 
                 {/* Start Button */}
                 <button
+                  type="button"
                   onClick={handleStartInterview}
                   disabled={isStarting}
                   className="w-full relative group disabled:opacity-50 disabled:cursor-not-allowed"

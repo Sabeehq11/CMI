@@ -1,12 +1,23 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+
+// Disable static generation for this page since it uses browser APIs
+export const dynamic = 'force-dynamic'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft, Mic, MicOff, Loader2, Volume2, VolumeX, Clock, Sparkles } from 'lucide-react'
 import Link from 'next/link'
 import { formatDuration } from '@/lib/utils'
 import toast from 'react-hot-toast'
-import RecordRTC from 'recordrtc'
+import { InterviewWebSocket, playAudioFromBase64 } from '@/lib/websocket-client'
+
+// Dynamic import for RecordRTC to avoid SSR issues
+let RecordRTC: any = null
+if (typeof window !== 'undefined') {
+  import('recordrtc').then((module) => {
+    RecordRTC = module.default
+  })
+}
 
 interface SessionData {
   student: {
@@ -34,18 +45,92 @@ export default function InterviewPage() {
   const [isMuted, setIsMuted] = useState(false)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [isSessionActive, setIsSessionActive] = useState(false)
+  const [wsConnected, setWsConnected] = useState(false)
+  const [processingMessage, setProcessingMessage] = useState('')
   
-  const recorderRef = useRef<RecordRTC | null>(null)
+  const recorderRef = useRef<any | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const wsRef = useRef<InterviewWebSocket | null>(null)
+
+  // Initialize WebSocket
+  useEffect(() => {
+    const initializeWebSocket = async () => {
+      const ws = new InterviewWebSocket({
+        onSessionJoined: (data) => {
+          console.log('Session joined:', data)
+          setWsConnected(true)
+          setIsSessionActive(true)
+        },
+        onTranscription: (text, speaker) => {
+          const entry: TranscriptEntry = {
+            speaker: speaker as 'user' | 'ai',
+            text,
+            timestamp: new Date()
+          }
+          setTranscript(prev => [...prev, entry])
+          setCurrentTranscription('')
+          setProcessingMessage('')
+        },
+        onAIResponse: (text, speaker) => {
+          const entry: TranscriptEntry = {
+            speaker: 'ai',
+            text,
+            timestamp: new Date()
+          }
+          setTranscript(prev => [...prev, entry])
+        },
+        onAIAudio: async (audioData, format) => {
+          try {
+            await playAudioFromBase64(audioData, format)
+            setProcessingMessage('')
+          } catch (error) {
+            console.error('Error playing AI audio:', error)
+            console.error('Failed to play AI response')
+          }
+        },
+        onProcessing: (message) => {
+          setProcessingMessage(message)
+        },
+        onReady: () => {
+          setProcessingMessage('')
+          setIsProcessing(false)
+        },
+        onError: (message) => {
+          alert(message)
+          setProcessingMessage('')
+          setIsProcessing(false)
+        }
+      })
+
+      try {
+        await ws.connect()
+        wsRef.current = ws
+      } catch (error) {
+        console.error('Failed to connect WebSocket:', error)
+                  alert('Connection Failed: The interview server is not running. Please ensure the WebSocket server is started.')
+        
+        // Redirect back to student page after delay
+        setTimeout(() => {
+          router.push('/student')
+        }, 3000)
+      }
+    }
+
+    initializeWebSocket()
+
+    return () => {
+      wsRef.current?.disconnect()
+    }
+  }, [])
 
   // Load session data from sessionStorage
   useEffect(() => {
     const storedSession = sessionStorage.getItem('currentSession')
     if (!storedSession) {
-      toast.error('No session found. Please start a new assessment.')
+      alert('No session found. Please start a new assessment.')
       router.push('/student')
       return
     }
@@ -105,11 +190,12 @@ export default function InterviewPage() {
       const result = await response.json()
       
       // Update session data with server response
-      setSessionData({
+      const updatedSessionData = {
         ...data,
         sessionId: result.session_id,
         initialQuestion: result.initial_question
-      })
+      }
+      setSessionData(updatedSessionData)
 
       // Add initial AI question to transcript
       if (result.initial_question) {
@@ -119,20 +205,37 @@ export default function InterviewPage() {
           timestamp: new Date()
         }])
         
-        // Play the initial question via TTS
-        playAIResponse(result.initial_question)
+        // Play the initial question via TTS (fallback if WebSocket not ready)
+        if (!wsRef.current?.isConnected()) {
+          playAIResponse(result.initial_question)
+        }
       }
 
-      setIsSessionActive(true)
+      // Join WebSocket session if connected
+      if (wsRef.current?.isConnected()) {
+        wsRef.current.joinSession(result.session_id, {
+          language: data.student.targetLanguage,
+          studentName: data.student.firstName,
+          studentId: result.student_id,
+          rubric: result.rubric
+        })
+      } else {
+        setIsSessionActive(true)
+      }
     } catch (error) {
       console.error('Error starting session:', error)
-      toast.error('Failed to start interview session')
+      alert('Failed to start interview session')
       router.push('/student')
     }
   }
 
   const startRecording = async () => {
     try {
+      if (!RecordRTC) {
+        alert('Recording library not loaded. Please refresh the page.')
+        return
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
 
@@ -140,10 +243,14 @@ export default function InterviewPage() {
         type: 'audio',
         mimeType: 'audio/webm',
         recorderType: RecordRTC.StereoAudioRecorder,
-        timeSlice: 1000, // Get data every second
+        timeSlice: 500, // Get data every 500ms instead of 1000ms for smaller chunks
+        desiredSampRate: 16000, // Lower sample rate for smaller data
+        numberOfAudioChannels: 1, // Mono audio is sufficient for speech
         ondataavailable: (blob: Blob) => {
-          // Send audio chunk to server for processing
-          sendAudioChunk(blob)
+          // Only send if blob has data
+          if (blob.size > 0) {
+            sendAudioChunkToWebSocket(blob)
+          }
         }
       })
 
@@ -151,10 +258,10 @@ export default function InterviewPage() {
       recorderRef.current = recorder
       setIsRecording(true)
       
-      toast.success('Recording started')
+      console.log('Recording started')
     } catch (error) {
       console.error('Error accessing microphone:', error)
-      toast.error('Failed to access microphone. Please check permissions.')
+      alert('Failed to access microphone. Please check permissions.')
     }
   }
 
@@ -165,34 +272,47 @@ export default function InterviewPage() {
           streamRef.current.getTracks().forEach(track => track.stop())
         }
         setIsRecording(false)
-        toast.success('Recording stopped')
+        setIsProcessing(true)
+        setProcessingMessage('Processing your speech...')
+        
+        // Notify WebSocket that audio has ended
+        if (wsRef.current?.isConnected()) {
+          wsRef.current.endAudio()
+        }
+        
+        console.log('Recording stopped')
       })
     }
   }
 
-  const sendAudioChunk = async (blob: Blob) => {
-    // In a real implementation, this would send to WebSocket
-    // For now, we'll simulate transcription
-    console.log('Sending audio chunk:', blob.size)
-    
-    // Simulate transcription with more realistic responses
-    const sampleResponses = [
-      "Hi, my name is John and I'm a software developer with 5 years of experience.",
-      "I really enjoy working on challenging projects and learning new technologies.",
-      "In my free time, I like to read books and go hiking with my friends.",
-      "I think communication skills are very important in any profession.",
-      "My goal is to become a technical lead and mentor other developers."
-    ]
-    
-    setTimeout(() => {
-      const response = sampleResponses[Math.floor(Math.random() * sampleResponses.length)]
-      setCurrentTranscription(response)
+  const sendAudioChunkToWebSocket = async (blob: Blob) => {
+    if (!wsRef.current?.isConnected()) {
+      console.warn('WebSocket not connected, cannot send audio chunk')
+      return
+    }
+
+    // Limit chunk size to prevent issues
+    const MAX_CHUNK_SIZE = 100 * 1024 // 100KB max per chunk
+    if (blob.size > MAX_CHUNK_SIZE) {
+      console.warn('Audio chunk too large:', blob.size, 'bytes. Skipping.')
+      return
+    }
+
+    try {
+      // Convert blob to ArrayBuffer
+      const arrayBuffer = await blob.arrayBuffer()
       
-      // Auto-submit after 3 seconds
-      setTimeout(() => {
-        handleUserSpeechEnd()
-      }, 3000)
-    }, 500)
+      // Send to WebSocket server
+      wsRef.current.sendAudioChunk(arrayBuffer)
+      
+      console.log('Sent audio chunk:', blob.size, 'bytes')
+    } catch (error) {
+      console.error('Error sending audio chunk:', error)
+      // Don't show toast for every chunk failure to avoid spam
+      if (error instanceof RangeError) {
+        console.error('Audio chunk too large for processing')
+      }
+    }
   }
 
   const simulateUserSpeech = () => {
@@ -273,7 +393,7 @@ export default function InterviewPage() {
       clearInterval(timerRef.current)
     }
     
-    toast.success('Interview completed! Processing your results...')
+    alert('Interview completed! Processing your results...')
     
     // In a real implementation, this would call the scoring API
     setTimeout(() => {
@@ -284,9 +404,9 @@ export default function InterviewPage() {
   const toggleMute = () => {
     setIsMuted(!isMuted)
     if (isMuted) {
-      toast.success('Audio unmuted')
+      console.log('Audio unmuted')
     } else {
-      toast.success('Audio muted')
+      console.log('Audio muted')
     }
   }
 
@@ -373,13 +493,27 @@ export default function InterviewPage() {
                       </div>
                     )}
                     
+                    {/* Recording indicator */}
+                    {isRecording && !currentTranscription && !isProcessing && (
+                      <div className="flex justify-end">
+                        <div className="max-w-[80%] p-4 rounded-xl bg-gradient-to-br from-gray-600/50 to-gray-800/50 text-white">
+                          <div className="flex items-center space-x-2">
+                            <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+                            <span className="text-sm text-gray-300">Recording... Speak clearly</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
                     {/* Processing indicator */}
-                    {isProcessing && (
+                    {(isProcessing || processingMessage) && (
                       <div className="flex justify-start">
                         <div className="glass-card-silver p-4 rounded-xl">
                           <div className="flex items-center space-x-2">
                             <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
-                            <span className="text-sm text-gray-400">AI is thinking...</span>
+                            <span className="text-sm text-gray-400">
+                              {processingMessage || 'AI is thinking...'}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -408,6 +542,12 @@ export default function InterviewPage() {
                       <span className="text-gray-400">Session ID:</span>
                       <span className="ml-2 text-xs font-mono">{sessionData.sessionId.slice(0, 8)}...</span>
                     </div>
+                    <div>
+                      <span className="text-gray-400">Connection:</span>
+                      <span className={`ml-2 font-medium ${wsConnected ? 'text-green-400' : 'text-red-400'}`}>
+                        {wsConnected ? 'Connected' : 'Disconnected'}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -418,7 +558,7 @@ export default function InterviewPage() {
                   {/* Microphone Button */}
                   <button
                     onClick={isRecording ? stopRecording : startRecording}
-                    disabled={!isSessionActive || isProcessing}
+                    disabled={!isSessionActive || isProcessing || !wsConnected}
                     className={`w-full relative group disabled:opacity-50 disabled:cursor-not-allowed mb-4`}
                   >
                     <div className={`absolute inset-0 rounded-xl blur opacity-75 transition duration-200 ${

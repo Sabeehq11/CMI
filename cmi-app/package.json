@@ -6,13 +6,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "init-firebase": "tsx scripts/init-firebase.ts",
+    "ws-server": "tsx websocket-server-standalone.ts",
+    "dev:all": "./start-servers.sh"
   },
   "dependencies": {
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.53.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "dotenv": "^17.2.1",
+    "firebase": "^12.0.0",
+    "firebase-admin": "^13.4.0",
     "lucide-react": "^0.534.0",
     "next": "15.4.5",
     "openai": "^5.11.0",
@@ -23,7 +29,9 @@
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "tailwind-merge": "^3.3.1",
-    "wavesurfer.js": "^7.10.1"
+    "tsx": "^4.19.2",
+    "wavesurfer.js": "^7.10.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
@@ -33,6 +41,7 @@
     "@types/react-dom": "^19",
     "@types/recordrtc": "^5.6.14",
     "@types/wavesurfer.js": "^6.0.12",
+    "@types/ws": "^8.5.13",
     "autoprefixer": "^10.4.21",
     "eslint": "^9",
     "eslint-config-next": "15.4.5",

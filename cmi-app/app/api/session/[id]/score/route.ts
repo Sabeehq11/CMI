@@ -2,16 +2,19 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import OpenAI from 'openai'
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
+function getOpenAIClient() {
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  })
+}
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const sessionId = params.id
+    const { id } = await params
+    const sessionId = id
     const supabase = await createServerSupabaseClient()
 
     // Get session data with rubric
@@ -78,6 +81,7 @@ Return your response in the following JSON format:
 `
 
     // Call GPT-4 for scoring
+    const openai = getOpenAIClient()
     const completion = await openai.chat.completions.create({
       model: "gpt-4-turbo-preview",
       messages: [
