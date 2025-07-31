@@ -10,21 +10,45 @@ function getOpenAIClient() {
 // Audio processing utilities
 export async function transcribeAudio(audioBuffer: Buffer, language: string = 'en'): Promise<string> {
   try {
-    // Create a temporary file-like object for OpenAI
-    const audioFile = new File([audioBuffer], 'audio.webm', { type: 'audio/webm' })
+    // Validate minimum audio size (avoid transcribing tiny chunks)
+    if (audioBuffer.length < 1024) {
+      console.log('Audio buffer too small, skipping transcription')
+      return ''
+    }
+
+    // Create a temporary file-like object for OpenAI with WAV format for better compatibility
+    const audioFile = new File([audioBuffer], 'audio.wav', { type: 'audio/wav' })
     
     const openai = getOpenAIClient()
     const transcription = await openai.audio.transcriptions.create({
       file: audioFile,
       model: 'whisper-1',
       language: language, // Use the provided language code
-      response_format: 'text'
+      response_format: 'text',
+      temperature: 0.2, // Lower temperature for more consistent results
+      prompt: 'This is a language learning interview conversation.' // Context helps accuracy
     })
     
-    return transcription
+    // Clean up the transcription
+    const cleanedTranscription = transcription.trim()
+    
+    // Filter out common transcription noise
+    const noisePatterns = [
+      /^(uh|um|hmm|ah|er)\.?$/i,
+      /^\.\.\.$/, // ellipsis only
+      /^[^a-zA-Z0-9\u00C0-\u017F\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u4e00-\u9fff]+$/ // Only punctuation/symbols
+    ]
+    
+    if (noisePatterns.some(pattern => pattern.test(cleanedTranscription))) {
+      console.log('Filtered out transcription noise:', cleanedTranscription)
+      return ''
+    }
+    
+    return cleanedTranscription
   } catch (error) {
     console.error('Transcription error:', error)
-    throw new Error('Failed to transcribe audio')
+    // Don't throw error to prevent disrupting the conversation flow
+    return ''
   }
 }
 

@@ -1,0 +1,36 @@
+
+> cmi-app@0.1.0 ws-server
+> tsx websocket-server-standalone.ts
+
+[dotenv@17.2.1] injecting env (11) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+Running WebSocket server in DEMO MODE - Supabase not configured
+Starting WebSocket server on port 3001
+Mode: DEMO
+WebSocket server running on ws://localhost:3001/websocket
+node:events:485
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::3001
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at Server.listen (node:net:2102:7)
+    at new WebSocketServer (/Users/sabeehqureshi/Desktop/github projects/CMI/cmi-app/node_modules/ws/lib/websocket-server.js:102:20)
+    at <anonymous> (/Users/sabeehqureshi/Desktop/github projects/CMI/cmi-app/websocket-server-standalone.ts:44:13)
+    at Object.<anonymous> (/Users/sabeehqureshi/Desktop/github projects/CMI/cmi-app/websocket-server-standalone.ts:363:75)
+    at Module._compile (node:internal/modules/cjs/loader:1692:14)
+    at Object.transformer (/Users/sabeehqureshi/Desktop/github projects/CMI/cmi-app/node_modules/tsx/dist/register-D46fvsV_.cjs:3:1104)
+    at Module.load (node:internal/modules/cjs/loader:1427:32)
+    at Module._load (node:internal/modules/cjs/loader:1250:12)
+Emitted 'error' event on WebSocketServer instance at:
+    at Server.emit (node:events:507:28)
+    at emitErrorNT (node:net:1976:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -48,
+  syscall: 'listen',
+  address: '::',
+  port: 3001
+}
+
+Node.js v24.3.0

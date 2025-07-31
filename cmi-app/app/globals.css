@@ -246,6 +246,69 @@
     box-shadow: 0 6px 20px rgba(192, 192, 192, 0.5),
                 inset 0 1px 1px rgba(255, 255, 255, 0.7);
   }
+
+  /* Immersive Interview UI Styles */
+  .ai-glow-idle {
+    filter: drop-shadow(0 0 20px rgba(168, 218, 220, 0.5));
+  }
+
+  .ai-glow-listening {
+    filter: drop-shadow(0 0 30px rgba(255, 107, 107, 0.7));
+    animation: pulse-listening 1.5s ease-in-out infinite;
+  }
+
+  .ai-glow-thinking {
+    filter: drop-shadow(0 0 25px rgba(255, 230, 109, 0.6));
+    animation: pulse-thinking 2s ease-in-out infinite;
+  }
+
+  .ai-glow-speaking {
+    filter: drop-shadow(0 0 35px rgba(78, 205, 196, 0.8));
+    animation: pulse-speaking 0.8s ease-in-out infinite;
+  }
+
+  @keyframes pulse-listening {
+    0%, 100% { opacity: 0.8; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes pulse-thinking {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+  }
+
+  @keyframes pulse-speaking {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.02); }
+  }
+
+  .transcript-bubble-enter {
+    animation: bubble-enter 0.3s ease-out;
+  }
+
+  @keyframes bubble-enter {
+    0% {
+      opacity: 0;
+      transform: translateY(10px) scale(0.9);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .mic-button-pulse {
+    animation: mic-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes mic-pulse {
+    0%, 100% {
+      box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+    }
+    50% {
+      box-shadow: 0 0 0 20px rgba(255, 255, 255, 0);
+    }
+  }
 }
 
 /* Custom scrollbar */

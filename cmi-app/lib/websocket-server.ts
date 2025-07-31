@@ -153,6 +153,12 @@ async function handleAudioChunk(sessionId: string, audioChunk: Buffer) {
     return
   }
 
+  // Validate chunk size
+  if (audioChunk.length === 0) {
+    console.log('Empty audio chunk received, skipping')
+    return
+  }
+
   // Add audio chunk to buffer
   connection.audioChunks.push(audioChunk)
 
@@ -161,10 +167,20 @@ async function handleAudioChunk(sessionId: string, audioChunk: Buffer) {
     clearTimeout(connection.silenceTimer)
   }
 
-  // Set new silence timer (1 second of silence triggers processing)
+  // Set new silence timer (2 seconds of silence triggers processing for better accuracy)
   connection.silenceTimer = setTimeout(() => {
     processAudioBuffer(sessionId)
-  }, 1000)
+  }, 2000)
+
+  // Auto-process if buffer gets too large (prevent memory issues)
+  const totalBufferSize = connection.audioChunks.reduce((total, chunk) => total + chunk.length, 0)
+  if (totalBufferSize > 500 * 1024) { // 500KB limit
+    console.log('Audio buffer limit reached, processing early')
+    if (connection.silenceTimer) {
+      clearTimeout(connection.silenceTimer)
+    }
+    processAudioBuffer(sessionId)
+  }
 }
 
 async function handleAudioEnd(sessionId: string) {
@@ -193,17 +209,36 @@ async function processAudioBuffer(sessionId: string) {
     const audioBuffer = Buffer.concat(connection.audioChunks)
     connection.audioChunks = [] // Clear buffer
 
+    // Skip processing if audio buffer is too small (likely just noise)
+    if (audioBuffer.length < 8192) { // 8KB minimum
+      console.log('Audio buffer too small, skipping processing')
+      connection.isProcessing = false
+      return
+    }
+
     // Send processing status
     connection.ws.send(JSON.stringify({
       type: 'processing',
       message: 'Transcribing audio...'
     }))
 
-    // Transcribe audio
-    const transcription = await transcribeAudio(audioBuffer, connection.language)
+    console.log(`Processing audio buffer: ${audioBuffer.length} bytes`)
+
+    // Transcribe audio with timeout
+    const transcriptionPromise = transcribeAudio(audioBuffer, connection.language)
+    const timeoutPromise = new Promise<string>((_, reject) => 
+      setTimeout(() => reject(new Error('Transcription timeout')), 15000) // 15 second timeout
+    )
+    
+    const transcription = await Promise.race([transcriptionPromise, timeoutPromise])
     
     if (!transcription.trim()) {
+      console.log('Empty transcription result')
       connection.isProcessing = false
+      connection.ws.send(JSON.stringify({
+        type: 'ready',
+        message: 'Ready for next input'
+      }))
       return
     }
 

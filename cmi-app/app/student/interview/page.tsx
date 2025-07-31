@@ -1,15 +1,42 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
-
-// Disable static generation for this page since it uses browser APIs
-export const dynamic = 'force-dynamic'
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
+import dynamicImport from 'next/dynamic'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, Mic, MicOff, Loader2, Volume2, VolumeX, Clock, Sparkles } from 'lucide-react'
+import { ArrowLeft, Mic, MicOff, Loader2, Volume2, VolumeX, Clock, Sparkles, MessageSquare, User } from 'lucide-react'
 import Link from 'next/link'
 import { formatDuration } from '@/lib/utils'
 import toast from 'react-hot-toast'
 import { InterviewWebSocket, playAudioFromBase64 } from '@/lib/websocket-client'
+import { motion, AnimatePresence } from 'framer-motion'
+
+// Disable static generation for this page since it uses browser APIs
+export const dynamic = 'force-dynamic'
+
+// Simple placeholder for 3D component (can be implemented later)
+const AIInterviewer3D = ({ state }: { state: string }) => (
+  <div className="w-full h-full flex items-center justify-center">
+    <div className="glass-card-silver rounded-2xl p-8 flex flex-col items-center space-y-4">
+      <div className={`w-24 h-24 rounded-full border-4 transition-all duration-300 ${
+        state === 'listening' ? 'border-green-400 bg-green-400/20 animate-pulse' :
+        state === 'thinking' ? 'border-yellow-400 bg-yellow-400/20' :
+        state === 'speaking' ? 'border-blue-400 bg-blue-400/20 animate-pulse' :
+        'border-gray-400 bg-gray-400/20'
+      }`}>
+        <div className="w-full h-full rounded-full bg-gradient-to-br from-gray-600 to-gray-800 flex items-center justify-center">
+          {state === 'listening' && <Mic className="w-8 h-8 text-green-400" />}
+          {state === 'thinking' && <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />}
+          {state === 'speaking' && <Volume2 className="w-8 h-8 text-blue-400" />}
+          {state === 'idle' && <Sparkles className="w-8 h-8 text-gray-400" />}
+        </div>
+      </div>
+      <div className="text-center">
+        <div className="font-semibold text-white">AI Interviewer</div>
+        <div className="text-sm text-gray-400 capitalize">{state}</div>
+      </div>
+    </div>
+  </div>
+)
 
 // Dynamic import for RecordRTC to avoid SSR issues
 let RecordRTC: any = null
@@ -47,6 +74,7 @@ export default function InterviewPage() {
   const [isSessionActive, setIsSessionActive] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
   const [processingMessage, setProcessingMessage] = useState('')
+  const [aiState, setAiState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle')
   
   const recorderRef = useRef<any | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -73,6 +101,7 @@ export default function InterviewPage() {
           setTranscript(prev => [...prev, entry])
           setCurrentTranscription('')
           setProcessingMessage('')
+          setAiState('idle')
         },
         onAIResponse: (text, speaker) => {
           const entry: TranscriptEntry = {
@@ -81,18 +110,23 @@ export default function InterviewPage() {
             timestamp: new Date()
           }
           setTranscript(prev => [...prev, entry])
+          setAiState('speaking')
         },
         onAIAudio: async (audioData, format) => {
           try {
             await playAudioFromBase64(audioData, format)
             setProcessingMessage('')
+            // Return to idle after speaking
+            setTimeout(() => setAiState('idle'), 2000)
           } catch (error) {
             console.error('Error playing AI audio:', error)
             console.error('Failed to play AI response')
+            setAiState('idle')
           }
         },
         onProcessing: (message) => {
           setProcessingMessage(message)
+          setAiState('thinking')
         },
         onReady: () => {
           setProcessingMessage('')
@@ -102,6 +136,7 @@ export default function InterviewPage() {
           alert(message)
           setProcessingMessage('')
           setIsProcessing(false)
+          setAiState('idle')
         }
       })
 
@@ -236,20 +271,40 @@ export default function InterviewPage() {
         return
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Check microphone permission first
+      try {
+        const permission = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+        if (permission.state === 'denied') {
+          alert('🎤 Microphone access is blocked!\n\nTo enable:\n1. Click the 🔒 lock icon in your browser address bar\n2. Allow microphone access\n3. Refresh the page and try again')
+          return
+        }
+      } catch (permissionError) {
+        console.warn('Could not check microphone permission:', permissionError)
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      })
       streamRef.current = stream
 
       const recorder = new RecordRTC(stream, {
         type: 'audio',
-        mimeType: 'audio/webm',
+        mimeType: 'audio/wav', // WAV format is more compatible
         recorderType: RecordRTC.StereoAudioRecorder,
-        timeSlice: 500, // Get data every 500ms instead of 1000ms for smaller chunks
-        desiredSampRate: 16000, // Lower sample rate for smaller data
-        numberOfAudioChannels: 1, // Mono audio is sufficient for speech
+        timeSlice: 1000, // Larger chunks for better transcription accuracy (1 second)
+        desiredSampRate: 16000, // Optimized for speech recognition
+        numberOfAudioChannels: 1, // Mono audio
+        bufferSize: 4096, // Smaller buffer for lower latency
         ondataavailable: (blob: Blob) => {
-          // Only send if blob has data
-          if (blob.size > 0) {
+          // Only send if blob has meaningful data
+          if (blob.size > 4096) { // Minimum 4KB to avoid noise
             sendAudioChunkToWebSocket(blob)
+          } else {
+            console.log('Skipping small audio chunk:', blob.size, 'bytes')
           }
         }
       })
@@ -257,11 +312,22 @@ export default function InterviewPage() {
       recorder.startRecording()
       recorderRef.current = recorder
       setIsRecording(true)
+      setAiState('listening')
       
-      console.log('Recording started')
-    } catch (error) {
+      console.log('Recording started successfully')
+    } catch (error: any) {
       console.error('Error accessing microphone:', error)
-      alert('Failed to access microphone. Please check permissions.')
+      
+      // Provide specific error messages based on error type
+      if (error.name === 'NotAllowedError') {
+        alert('🎤 MICROPHONE PERMISSION DENIED\n\nTo fix this:\n\n1. Click the 🔒 lock icon next to the URL\n2. Set microphone to "Allow"\n3. Refresh the page\n4. Try recording again\n\nNote: Microphone access is required for voice interviews.')
+      } else if (error.name === 'NotFoundError') {
+        alert('🎤 No microphone found!\n\nPlease:\n1. Connect a microphone\n2. Check it\'s working in system settings\n3. Refresh the page and try again')
+      } else if (error.name === 'NotReadableError') {
+        alert('🎤 Microphone is busy!\n\nPlease:\n1. Close other apps using the microphone\n2. Refresh the page\n3. Try again')
+      } else {
+        alert(`🎤 Microphone Error: ${error.message}\n\nTry:\n1. Refreshing the page\n2. Checking microphone permissions\n3. Using a different browser`)
+      }
     }
   }
 
@@ -274,6 +340,7 @@ export default function InterviewPage() {
         setIsRecording(false)
         setIsProcessing(true)
         setProcessingMessage('Processing your speech...')
+        setAiState('thinking')
         
         // Notify WebSocket that audio has ended
         if (wsRef.current?.isConnected()) {
@@ -291,16 +358,22 @@ export default function InterviewPage() {
       return
     }
 
-    // Limit chunk size to prevent issues
-    const MAX_CHUNK_SIZE = 100 * 1024 // 100KB max per chunk
+    // Increased chunk size limit for better quality
+    const MAX_CHUNK_SIZE = 200 * 1024 // 200KB max per chunk
     if (blob.size > MAX_CHUNK_SIZE) {
       console.warn('Audio chunk too large:', blob.size, 'bytes. Skipping.')
       return
     }
 
     try {
-      // Convert blob to ArrayBuffer
+      // Convert blob to ArrayBuffer with error handling
       const arrayBuffer = await blob.arrayBuffer()
+      
+      // Validate array buffer
+      if (arrayBuffer.byteLength === 0) {
+        console.warn('Empty audio chunk, skipping')
+        return
+      }
       
       // Send to WebSocket server
       wsRef.current.sendAudioChunk(arrayBuffer)
@@ -308,9 +381,15 @@ export default function InterviewPage() {
       console.log('Sent audio chunk:', blob.size, 'bytes')
     } catch (error) {
       console.error('Error sending audio chunk:', error)
-      // Don't show toast for every chunk failure to avoid spam
+      
+      // Provide user feedback for persistent issues
       if (error instanceof RangeError) {
         console.error('Audio chunk too large for processing')
+      } else if (error instanceof DOMException) {
+        console.error('Audio format conversion failed')
+      } else {
+        // Don't spam the user, but log for debugging
+        console.error('Unexpected error processing audio chunk')
       }
     }
   }
@@ -419,210 +498,210 @@ export default function InterviewPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white">
-      {/* Background effects */}
-      <div className="fixed inset-0 -z-10 cyber-grid opacity-20" />
-      <div className="fixed inset-0 -z-10 bg-gradient-to-br from-gray-950/20 via-black to-gray-950/20" />
+    <div className="min-h-screen bg-black text-white overflow-hidden">
+      {/* Animated background */}
+      <div className="fixed inset-0 -z-10">
+        <div className="absolute inset-0 bg-gradient-to-br from-gray-950 via-black to-gray-950" />
+        <div className="absolute inset-0 cyber-grid opacity-10" />
+        {/* Audio-reactive particles would go here */}
+      </div>
       
-      <div className="relative z-10">
-        <div className="container mx-auto px-6 py-8">
-          {/* Navigation */}
-          <nav className="flex justify-between items-center mb-8">
-            <Link href="/student" className="inline-flex items-center text-gray-400 hover:text-white transition-colors group">
-              <ArrowLeft className="w-5 h-5 mr-2 group-hover:-translate-x-1 transition-transform" />
-              End Interview
-            </Link>
-            <div className="flex items-center space-x-4">
-              {/* Timer */}
-              <div className="flex items-center space-x-2 glass-card-silver px-4 py-2 rounded-lg">
+      <div className="relative z-10 h-screen flex flex-col">
+        {/* Top bar with session info */}
+        <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-20">
+          <Link href="/student" className="inline-flex items-center text-gray-400 hover:text-white transition-colors group">
+            <ArrowLeft className="w-5 h-5 mr-2 group-hover:-translate-x-1 transition-transform" />
+            End Interview
+          </Link>
+          
+          <div className="flex items-center space-x-4">
+            {/* Session info */}
+            <div className="glass-card-silver px-4 py-2 rounded-lg flex items-center space-x-4 text-sm">
+              <div className="flex items-center space-x-2">
+                <span className="text-gray-400">Language:</span>
+                <span className="font-medium">{sessionData.student.targetLanguage.toUpperCase()}</span>
+              </div>
+              <div className="w-px h-4 bg-gray-600" />
+              <div className="flex items-center space-x-2">
                 <Clock className="w-4 h-4 text-gray-400" />
-                <span className="font-mono text-sm">
+                <span className="font-mono">
                   {formatDuration(elapsedTime)} / 3:00
                 </span>
               </div>
-              {/* Mute button */}
-              <button
-                onClick={toggleMute}
-                className="p-2 glass-card-silver rounded-lg hover:bg-white/10 transition-colors"
-              >
-                {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-              </button>
-            </div>
-          </nav>
-
-          <div className="max-w-4xl mx-auto">
-            {/* Main Interview Area */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Transcript Panel */}
-              <div className="lg:col-span-2">
-                <div className="glass-card-silver p-6 metallic-border rounded-2xl h-[600px] flex flex-col">
-                  <h2 className="text-xl font-semibold mb-4 silver-text">Interview Transcript</h2>
-                  
-                  <div className="flex-1 overflow-y-auto space-y-4 pr-2">
-                    {transcript.map((entry, index) => (
-                      <div
-                        key={index}
-                        className={`flex ${entry.speaker === 'user' ? 'justify-end' : 'justify-start'}`}
-                      >
-                        <div
-                          className={`max-w-[80%] p-4 rounded-xl ${
-                            entry.speaker === 'user'
-                              ? 'bg-gradient-to-br from-gray-600 to-gray-800 text-white'
-                              : 'glass-card-silver'
-                          }`}
-                        >
-                          <div className="flex items-center space-x-2 mb-1">
-                            <span className="text-xs font-medium text-gray-300">
-                              {entry.speaker === 'user' ? 'You' : 'AI Interviewer'}
-                            </span>
-                            <span className="text-xs text-gray-500">
-                              {entry.timestamp.toLocaleTimeString()}
-                            </span>
-                          </div>
-                          <p className="text-sm">{entry.text}</p>
-                        </div>
-                      </div>
-                    ))}
-                    
-                    {/* Current transcription */}
-                    {currentTranscription && (
-                      <div className="flex justify-end">
-                        <div className="max-w-[80%] p-4 rounded-xl bg-gradient-to-br from-gray-600/50 to-gray-800/50 text-white animate-pulse">
-                          <p className="text-sm italic">{currentTranscription}</p>
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Recording indicator */}
-                    {isRecording && !currentTranscription && !isProcessing && (
-                      <div className="flex justify-end">
-                        <div className="max-w-[80%] p-4 rounded-xl bg-gradient-to-br from-gray-600/50 to-gray-800/50 text-white">
-                          <div className="flex items-center space-x-2">
-                            <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
-                            <span className="text-sm text-gray-300">Recording... Speak clearly</span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Processing indicator */}
-                    {(isProcessing || processingMessage) && (
-                      <div className="flex justify-start">
-                        <div className="glass-card-silver p-4 rounded-xl">
-                          <div className="flex items-center space-x-2">
-                            <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
-                            <span className="text-sm text-gray-400">
-                              {processingMessage || 'AI is thinking...'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    
-                    <div ref={transcriptEndRef} />
-                  </div>
-                </div>
+              <div className="w-px h-4 bg-gray-600" />
+              <div className="flex items-center space-x-2">
+                <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+                <span className="text-gray-400">
+                  {wsConnected ? 'Connected' : 'Disconnected'}
+                </span>
               </div>
+            </div>
+            
+            {/* Mute button */}
+            <button
+              onClick={toggleMute}
+              className="p-2 glass-card-silver rounded-lg hover:bg-white/10 transition-colors"
+            >
+              {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            </button>
+          </div>
+        </div>
 
-              {/* Controls Panel */}
-              <div className="space-y-6">
-                {/* Student Info */}
-                <div className="glass-card-silver p-6 metallic-border rounded-2xl">
-                  <h3 className="font-semibold mb-3">Session Info</h3>
-                  <div className="space-y-2 text-sm">
-                    <div>
-                      <span className="text-gray-400">Name:</span>
-                      <span className="ml-2">{sessionData.student.firstName}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Language:</span>
-                      <span className="ml-2">{sessionData.student.targetLanguage.toUpperCase()}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Session ID:</span>
-                      <span className="ml-2 text-xs font-mono">{sessionData.sessionId.slice(0, 8)}...</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Connection:</span>
-                      <span className={`ml-2 font-medium ${wsConnected ? 'text-green-400' : 'text-red-400'}`}>
-                        {wsConnected ? 'Connected' : 'Disconnected'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Recording Controls */}
-                <div className="glass-card-silver p-6 metallic-border rounded-2xl">
-                  <h3 className="font-semibold mb-4">Recording Controls</h3>
-                  
-                  {/* Microphone Button */}
-                  <button
-                    onClick={isRecording ? stopRecording : startRecording}
-                    disabled={!isSessionActive || isProcessing || !wsConnected}
-                    className={`w-full relative group disabled:opacity-50 disabled:cursor-not-allowed mb-4`}
-                  >
-                    <div className={`absolute inset-0 rounded-xl blur opacity-75 transition duration-200 ${
-                      isRecording 
-                        ? 'bg-red-500 animate-pulse' 
-                        : 'bg-gradient-to-r from-gray-600 to-gray-800 group-hover:opacity-100'
-                    }`}></div>
-                    <div className={`relative rounded-xl py-4 px-6 font-semibold flex items-center justify-center space-x-3 transition-transform ${
-                      isRecording 
-                        ? 'bg-red-500 text-white' 
-                        : 'button-silver group-hover:scale-[1.02]'
-                    }`}>
-                      {isRecording ? (
-                        <>
-                          <MicOff className="w-5 h-5" />
-                          <span>Stop Recording</span>
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="w-5 h-5" />
-                          <span>Start Recording</span>
-                        </>
-                      )}
-                    </div>
-                  </button>
-
-                  {/* Status Indicator */}
-                  <div className="flex items-center justify-center space-x-2 mb-4">
-                    <div className={`w-3 h-3 rounded-full ${
-                      isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-600'
-                    }`} />
-                    <span className="text-sm text-gray-400">
-                      {isRecording ? 'Recording...' : 'Not recording'}
-                    </span>
-                  </div>
-
-                  {/* Demo Speech Button */}
-                  {isRecording && (
-                    <button
-                      onClick={simulateUserSpeech}
-                      className="w-full px-4 py-2 glass-card-silver rounded-lg hover:bg-white/10 transition-colors text-sm"
+        {/* Main content area */}
+        <div className="flex-1 flex">
+          {/* Left sidebar - Transcript */}
+          <div className="w-96 p-4 pt-20">
+            <div className="glass-card-silver h-full rounded-2xl p-4 flex flex-col">
+              <div className="flex items-center space-x-2 mb-4">
+                <MessageSquare className="w-5 h-5 text-gray-400" />
+                <h2 className="text-lg font-semibold silver-text">Conversation</h2>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2">
+                <AnimatePresence>
+                  {transcript.map((entry, index) => (
+                    <motion.div
+                      key={index}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -20 }}
+                      transition={{ duration: 0.3 }}
+                      className={`flex ${entry.speaker === 'user' ? 'justify-end' : 'justify-start'}`}
                     >
-                      🎭 Simulate Speech (Demo)
-                    </button>
-                  )}
-                </div>
-
-                {/* Instructions */}
-                <div className="glass-card-silver p-4 rounded-xl">
-                  <div className="flex items-start space-x-3">
-                    <Sparkles className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
-                    <div className="text-sm text-gray-400">
-                      <p className="mb-2">Tips for best results:</p>
-                      <ul className="space-y-1 text-xs">
-                        <li>• Speak clearly and naturally</li>
-                        <li>• Pause briefly after speaking</li>
-                        <li>• Stay close to your microphone</li>
-                        <li>• Minimize background noise</li>
-                      </ul>
+                      <div
+                        className={`max-w-[85%] p-3 rounded-xl ${
+                          entry.speaker === 'user'
+                            ? 'bg-gradient-to-br from-gray-600 to-gray-800 text-white'
+                            : 'bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2 mb-1">
+                          {entry.speaker === 'user' ? (
+                            <User className="w-3 h-3" />
+                          ) : (
+                            <Sparkles className="w-3 h-3 text-gray-400" />
+                          )}
+                          <span className="text-xs font-medium text-gray-300">
+                            {entry.speaker === 'user' ? 'You' : 'AI Interviewer'}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {entry.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <p className="text-sm leading-relaxed">{entry.text}</p>
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+                
+                {/* Current transcription */}
+                {currentTranscription && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-end"
+                  >
+                    <div className="max-w-[85%] p-3 rounded-xl bg-gradient-to-br from-gray-600/50 to-gray-800/50 text-white">
+                      <p className="text-sm italic">{currentTranscription}</p>
                     </div>
-                  </div>
-                </div>
+                  </motion.div>
+                )}
+                
+                {/* Processing indicator */}
+                {(isProcessing || processingMessage) && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-start"
+                  >
+                    <div className="glass-card-silver p-3 rounded-xl">
+                      <div className="flex items-center space-x-2">
+                        <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                        <span className="text-sm text-gray-400">
+                          {processingMessage || 'AI is thinking...'}
+                        </span>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+                
+                <div ref={transcriptEndRef} />
               </div>
             </div>
+          </div>
+
+          {/* Center - 3D AI Interviewer */}
+          <div className="flex-1 flex items-center justify-center">
+            <div className="w-full h-full max-w-2xl max-h-[600px] relative">
+              <Suspense fallback={
+                <div className="w-full h-full flex items-center justify-center">
+                  <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
+                </div>
+              }>
+                <AIInterviewer3D state={aiState} />
+              </Suspense>
+            </div>
+          </div>
+
+          {/* Right side - empty for balance */}
+          <div className="w-96" />
+        </div>
+
+        {/* Bottom center - Recording controls */}
+        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">
+          <div className="flex flex-col items-center space-y-4">
+            {/* Voice prompt */}
+            <AnimatePresence>
+              {isSessionActive && !isRecording && !isProcessing && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="text-gray-400 text-sm flex items-center space-x-2"
+                >
+                  <Mic className="w-4 h-4" />
+                  <span>Speak when ready...</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Recording button */}
+            <motion.button
+              onClick={isRecording ? stopRecording : startRecording}
+              disabled={!isSessionActive || isProcessing || !wsConnected}
+              className={`relative group disabled:opacity-50 disabled:cursor-not-allowed`}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              <div className={`absolute inset-0 rounded-full blur-xl opacity-75 transition duration-200 ${
+                isRecording 
+                  ? 'bg-red-500 animate-pulse' 
+                  : 'bg-gradient-to-r from-gray-600 to-gray-800 group-hover:opacity-100'
+              }`} />
+              <div className={`relative rounded-full p-6 font-semibold flex items-center justify-center transition-all ${
+                isRecording 
+                  ? 'bg-red-500 text-white shadow-lg shadow-red-500/50' 
+                  : 'bg-gradient-to-br from-gray-700 to-gray-900 text-white shadow-lg group-hover:shadow-xl'
+              }`}>
+                {isRecording ? (
+                  <MicOff className="w-8 h-8" />
+                ) : (
+                  <Mic className="w-8 h-8" />
+                )}
+              </div>
+            </motion.button>
+
+            {/* Demo button */}
+            {isRecording && (
+              <motion.button
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                onClick={simulateUserSpeech}
+                className="px-4 py-2 glass-card-silver rounded-lg hover:bg-white/10 transition-colors text-sm"
+              >
+                🎭 Simulate Speech (Demo)
+              </motion.button>
+            )}
           </div>
         </div>
       </div>
